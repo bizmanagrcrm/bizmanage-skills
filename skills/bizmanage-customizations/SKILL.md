@@ -7,8 +7,16 @@ description: Work with BizManage CRM customization repositories synced by bizman
 
 Use this skill for BizManage instance-specific codebases. These repos are local file representations of platform metadata and code that `bizmanage-cli` syncs to a live BizManage CRM instance at `https://<subdomain>.bizmanagecrm.com`. Everything here is instance-agnostic — it applies to any BizManage tenant, not a specific one. Any status IDs, table names, or business rules specific to one customer's instance belong in that instance's own repo/docs, never in this shared skill.
 
+## Reference Sources
+
+- [Maintained BizManage skills](https://github.com/bizmanagrcrm/bizmanage-skills): upstream customization guidance and the companion CLI skill.
+- [BMML documentation](https://github.com/bizmanagrcrm/bmml): custom pages, elements, functions, forms, reports, and platform requests.
+- [Server-side scripts](https://github.com/bizmanagrcrm/bmml/tree/main/server-side-scripts): execution, schedules, metadata, and injected modules.
+- [Customization examples](https://github.com/bizmanagecrm/EXAMPLE_CUSTOMIZATIONS): four adapted educational snapshots covering construction estimating, property management, donor management, and a customer ordering portal. Start with the selected README and catalog; adapt schema, IDs, and configuration. These are reference workflows, not configured applications or proof of live behavior.
+
 ## First Moves
 
+- Check the maintained upstream skill for relevant updates when accessible; reconcile them with the installed copy while preserving useful local additions. Verify version-sensitive guidance against the destination's deployed core.
 - Read `bizmanage.config.json` first. It identifies the instance URL, alias, project name, and last pull.
 - **Hard alias rule:** every `bizmanage` command that communicates with a platform instance must include the explicit alias from `bizmanage.config.json` via `-a <alias>`. Never rely on the CLI's `default` alias or assume the local project URL selects the remote target. This applies to `pull`, `push`, `test`, `status-detail`, `login`, `logout`, and any future remote command that supports `--alias`.
 - Before every pull or push, run `bizmanage status-detail -a <alias>` or `bizmanage test -a <alias>` and verify that the reported instance URL exactly matches `bizmanage.config.json`. Stop if it does not.
@@ -21,6 +29,7 @@ Use this skill for BizManage instance-specific codebases. These repos are local 
 ## File Layout
 
 - Objects/views live under `src/objects/<table-or-view>/definition.json`. `internal_name` is the stable key used by the platform.
+- Fresh custom objects (verified core 3.1.452/3.1.484) and SQL reports (3.1.484) derive `internal_name` from `display_name`, overriding the supplied name. Create with a label that internalizes to the intended name; rename the label afterward if needed. Verify a fresh-instance import.
 - Fields live under `src/objects/<table-or-view>/fields/<field_internal_name>.json`. Field docs in the core repo are usually at `docs/field.md`.
 - Actions live under `src/objects/<table-or-view>/actions/<action_name>.json`, often with an optional same-named `.js` file. A missing `.js` is normal for pure URL/menu actions.
 - Backend scripts live as paired `src/backend/<name>.json` metadata and `src/backend/<name>.js` code.
@@ -31,11 +40,23 @@ Use this skill for BizManage instance-specific codebases. These repos are local 
 ## Backend Scripts
 
 - The core wraps script code in an async function with `envData`, then destructures `let { user, query, body } = envData`.
-- Metadata `modules` controls injected variables. Known module names include `db`, `axios`, `https`, `_`, `moment`, `callScript`, `callReport`, `fieldHelper`, `pdfHelper`, `saveFileHelper`, `projectsHelper`, `deliveriesHelper`, `quotesHelper`, `mailHelper`, `templatesHelper`, `scheduleScriptExecution`, `proposalHelper`, `invoiceHelper`, `statusHelper`, `paymentsHelper`, `smsHelper`, `cheerio`, and `recycleBin`.
+- Metadata `modules` controls injected variables. Known module names include `db`, `axios`, `https`, `_`, `moment`, `callScript`, `callReport`, `fieldHelper`, `pdfHelper`, `saveFileHelper`, `projectsHelper`, `deliveriesHelper`, `quotesHelper`, `mailHelper`, `templatesHelper`, `scheduleScriptExecution`, `proposalHelper`, `invoiceHelper`, `statusHelper`, `paymentsHelper`, `aiHelper`, `smsHelper`, `cheerio`, and `recycleBin`.
+- Where the deployed core supports `aiHelper`, its `ask`, `generateJson`, and `runWithTools` methods use the execution user. Verify gateway/model availability and capabilities. For classification, prefer schema-bound `generateJson` results that code validates before applying changes.
+- For scheduled integrations, verify the deployed scheduler's timezone, overlap, and missed-run behavior. Use explicit business timezones and persistent checkpoints/reconciliation for resumable external writes.
+- Check deployed `backend_script` and `ai_tokens` metering when estimating automation costs; backend execution is not necessarily free, and nested script calls can add executions.
 - A script must contain a `return` somewhere; core validation rejects scripts without one.
+- The native admin **Run Script** control opens a session-authenticated GET `/scripts/run/<name>` (verified 3.1.485). The internal runner ignores metadata `method`; this is the existing UI path for empty-input setup scripts.
 - Default timeout is 30 seconds unless metadata has `timeout`. Long-running scripts should declare a suitable timeout.
-- `callScript(name, envData)` runs another custom backend script. `callReport(id, data)` executes a custom report by numeric platform ID.
+- On core 3.1.485, script timeout includes pool queueing and worker startup; timed-out queued work can still run. Do not treat a timeout as cancellation or automatically retry external effects.
+- Script workers on core 3.1.484 have a one-connection DB pool. Propagate `trx` through every nested read/write, including permission lookups. `db.readOne(table, filter, order, clms, { trx })` takes options fifth; verify the deployed helper signature.
+- `db.query` uses Knex bindings (verified 3.1.484): literal `?` inside quoted SQL regexes is still a placeholder. Avoid it, e.g. use `[-]{0,1}` for an optional minus.
+- `callScript(name, envData)` waits for another shared worker; concurrent waiting parents can exhaust the worker pool. Prefer durable queued dispatch for background work. `callReport(id, data)` executes a custom report by numeric platform ID.
+- On core 3.1.484, `scheduleScriptExecution(name, { after_ms, data: { body }, run_now: true }, user)` persists work without awaiting it. Fast wake hints cover delays up to 5 seconds; longer delays rely on native minute cron, which the isolated test kit disables. Keep long-job concurrency bounded so normal UI requests retain worker capacity.
+- Native queue `done_at` records transport completion, including caught script failures. Persist and display business outcomes separately; do not treat Queue Done as successful work.
+- On core 3.1.484, `saveFileHelper.save` stores buffers with PDF MIME. Verify a format-aware upload path before storing raw images or audio; changing the filename does not make the MIME correct.
 - Backend scripts may contain live credentials or tokens. Do not print secrets in responses, logs, or skill updates.
+- Verify script/request logging, native history and webhooks before choosing a credential setter. Keep secrets out of logged inputs/results, return status only, and enforce storage permissions; a hidden setting is not a secret store.
+- If the instance repository has `docs/instance-settings.md`, follow its runtime configuration registry and set-only agent procedure. A hidden setting (`visible: false`) is not secret access control; never retrieve or display its value merely to verify configuration.
 
 ## Reports
 
@@ -48,6 +69,11 @@ Use this skill for BizManage instance-specific codebases. These repos are local 
 ## Pages And Actions
 
 - Pages are AngularJS/EJS-era HTML snippets rendered by BizManage. Common globals/components include `$urlParams`, `$now`, `goToExternalUrl`, `executeActionByName`, `<bmml-report>`, and `<bmml-data-src>`.
+- On core 3.1.493, Admin Custom Pages' "Public" column reflects published status; `access_policy` separately controls internal/external access.
+- Core 3.1.484 enables Angular strict DI in both shells. Use explicit dependency annotations with `$injector.invoke` and other dynamically injected callbacks.
+- Match select option types to `ng-model`: use numeric `ng-options`/`ng-value` for numeric models. Plain option values are strings and can leave the selection blank.
+- Native shell links use `/#/page/<url>`; `/pages/<url>` serves the page template. A hard navigation to `/page/<url>` is not the shell route.
+- Native landing URLs on core 3.1.484 must be query-free (`/page/<url>`): default navigation encodes queries into the page path. Set default state inside the page; child menu links can include queries.
 - Menu/action docs in the core repo are usually at `docs/menu-item.md`.
 - Action JSON is upserted by table plus `action_name`. Preserve `table_name` and `action_name` unless the user wants a new action.
 - Action `.js` code runs in the frontend controller context and commonly uses `$http`, `notify`, `Modal`, `record`, `scope`, and route helpers, depending on action type and local examples.
@@ -142,6 +168,9 @@ When behavior is unclear, inspect these core-system files if available:
 
 ## CLI Workflow
 
+- For native test coverage, pin compatible core and runner commits. The selected core's committed `scripts/customization-tests/coverage-contract.json` declares v1 (inline metadata) or v2 (native backend initializers). Never rewrite capability markers to bypass compatibility checks.
+- Capture browser action coverage before a hard reload or tab close. End-of-test capture only sees the current document and can miss earlier executed actions.
+
 `bizmanage-cli` uses the `bizmanage` binary. Official docs are at `https://github.com/bizmanagrcrm/bizmanage-cli`; see [[bizmanage-cli]] for the full command reference.
 
 - `bizmanage status --changes-only`: show local changed/new/deleted customization files.
@@ -154,4 +183,4 @@ When behavior is unclear, inspect these core-system files if available:
 
 ## Updating This Skill
 
-Update this skill only with durable, verified BizManage-system facts that will save future agents time, and that hold across BizManage instances generally. Keep it concise. Do not add guesses, one-off debugging notes, or secrets — and do not add client-specific business rules (status IDs, table names unique to one tenant's customizations, specific instance URLs, etc.); those belong in that instance's own repo, not here.
+Whenever an agent discovers useful BizManage information missing from this skill, add it only after fully verifying that it applies generally across instances. Keep additions short, clear, and practical; update existing guidance instead of duplicating it, and exclude guesses, customer-specific details, and secrets.
